@@ -1,0 +1,243 @@
+---
+title: "Practical Machine Learning Project"
+author: "kj"
+date: "17 mai 2015"
+output: html_document
+---
+
+#Executive Summary
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).
+
+
+I this report we show how to deal with this information from reading data, cleaning, explore and building a machine learning algorithm to predict if the person how weel is a person sitting-down, standing-up, standing, walking or sitting ( 5 different classes how define de quality of the exercise). In the modeling part of this study a random forest was built and 10 fold cross-validation was used to fine tune the parameters of the model. 
+A high level of accuracy was achieved in the test data so we expect this model to generalize very well.
+
+
+### Loading Data
+
+```{r loadingData, echo=TRUE ,cache=TRUE}
+##  Load|Dataset 
+#Train Data
+data.raw <- read.csv("./data/pml-training.csv",header = TRUE, na.strings = c ("","NA"))
+#Test Data
+data.test <- read.csv("./data/pml-testing.csv",header = TRUE,na.strings = c ("","NA"))
+```
+### Take a peek into the data
+
+```{r lookintoData, echo=TRUE }
+##  Load|Dataset 
+dim(data.raw)    # Dimension
+names(data.raw) # Names
+str(data.raw)   # Structure
+```
+
+There is a large number of variables that can be considered id's, for example **timestamp** and **user name**. In my opinion they should not be used to model, the objective is to use the measures in the data set to predict the quality of the fisical exercises.
+
+Lets partition the dataset in training and test dataset. The **createDataPartition ** function form the caret package uses the class factors to do random sample using the diferent classes and preserve the overall class distribution of the data.
+
+```{r partition,echo=TRUE}
+library(caret)
+set.seed(998)
+inTraining <- createDataPartition(data.raw$classe, p = 0.75, list = FALSE)
+training <- data.raw[inTraining, ]
+testing <- data.raw[-inTraining, ]
+```
+
+A nice way to keep track of the variables that we don't need is to create a vector and store the variables we want to **ignore**.
+
+```{r deletevars}
+ids <- c("X","cvtd_timestamp","user_name","raw_timestamp_part_1","raw_timestamp_part_2")
+
+#Vector of variables you want to ignore
+ignore<-NULL
+ignore<-union(ignore,ids)
+```
+
+As it can be seen when we look in to the structure of the data, there are several variables is all intances missing. Let us see if somes variables have all observations missing.
+
+```{r lookallmissing}
+#All data Missing- if you look at the str output some will apear to be missing
+vars<-names(training)
+mvc<-sapply(training[vars],function(x)sum(is.na(x)))
+mvn<- names(which(mvc==nrow(training)))
+mvn
+```
+There's no variable with all the observations missing, so lets look at the missing data using the library "Amelia" and a nice **missing plot**.
+
+```{r scatterplot, fig.width=10, fig.height=6,cache=TRUE}
+library(Amelia)
+missmap(training, main=" Training Data - Missings Map", col=c("yellow", "black"), legend=FALSE)
+```
+
+Using this map we can see there is a lot of variables with many missing instances, lets remove the features with many missing values (> 70%).
+
+```{r removingmissing,echo=TRUE}
+mvn<-names(which(mvc>=0.7*nrow(training))) #removing variables with more than 70% of missings
+mvn
+ignore<-union(ignore,mvn)
+```
+There is two variables that are related to the time stamp. I chose to remove **new_window** and **num_window**, they seam more of a artifact of the data collection method then a true feature for this classification problem. We can always try to use them if the final modeling results are weak.
+
+```{r factorvariables} 
+#Treating factor variables
+others.to.ignore<-c("new_window","num_window")
+ignore<-union(ignore,others.to.ignore )
+```
+Now we have a vector of the variables we want to **remove**, so lets clean our data...
+```{r cleandata,echo=TRUE}
+vars.keep<-setdiff(vars, ignore)
+data.clean <- training[,vars.keep]
+```
+and see our missing data again using the Amelia package.
+
+```{r lookate missing,fig.width=10, fig.height=6,echo=TRUE}
+library(Amelia)
+missmap(data.clean, main=" Clean Data - Missings Map", col=c("yellow", "black"), legend=FALSE)
+```
+
+Now it looks very clean, lets look again at the structure of this data set.
+
+```{r lookintoData2, echo=TRUE }
+##  Load|Dataset 
+dim(data.clean)    # Dimension
+names(data.clean) # Names
+```
+
+## Looking into correlations
+
+In the caret package there is some functions to help us find correlations between the variables.
+```{r correlations,echo=TRUE,cache=TRUE}
+library(corrplot)
+correlations <- cor(data.clean[,-c(53)])
+corrplot(correlations, order = "hclust")
+```
+
+Visually we can't se a cluster of variables highly correlated, we could move forward to modeling, still we can use the function **findCorrelation** to obtain the most highly correlated variables in a pair-wise way.
+
+```{r findCorrelation,echo=TRUE}
+library(caret)
+highCorr <- findCorrelation(correlations, cutoff = .75)
+```
+
+and then remove this variables from the data set.
+
+```{r removingmorevariables}
+names(data.clean)[highCorr]
+
+ignore<-union(ignore,names(data.clean)[highCorr])
+vars.keep<-setdiff(vars, ignore)
+data.clean2 <- training[,vars.keep]
+```
+
+Done with cleaning.
+
+## Building Machine Learning algoritm
+First we define the type of cross-validation we want to use. This is a relatively big data set, we shall use the 10-fold cross-validation.
+
+```{r preparecrossvalidation,echo=TRUE}
+library(caret)
+ctrl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 5,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+```
+In our random forest the tuning parameter is the number of features randomly selected to create each tree. In the caret package the tunning parameter is named **mtry**.
+
+```{r tunevars}
+mtryValues <- c(1,2,3,4,5,10,20,32)
+```
+
+Now lets set up a seed and create a model using the train function from the caret package.
+
+```{r buildingmodel, echo=TRUE,cache=TRUE}
+set.seed(998)
+library(randomForest)
+rfFit <- train(x = data.clean2[,-c(35)], 
+               y = data.clean2$classe,
+               method = "rf",
+               ntree = 100,
+               tuneGrid = data.frame(mtry = mtryValues),
+               importance = TRUE,
+               trControl = ctrl)
+rfFit
+```
+
+Now the plot of the accuracy of our model using cross-validation.
+
+```{r plotcrossvalidation,fig.width=5,fig.height=3}
+plot(rfFit)
+```
+
+It can be seen that using more than 4 features to set up the trees on the random forest will lead to problems in performance of the model, probably due to over-fitting.
+
+Lets try to look at the most important features:
+
+```{r varimp,echo=TRUE}
+library(caret)
+rfImp <- varImp(rfFit, scale = FALSE)
+rfImp
+plot(rfImp, top = 10)
+```
+
+## Testing the Model
+Now we must estimate the quality of this model using the testing data set. First prepare the testing data:
+
+```{r preptesting}
+testing.clean <- testing[,vars.keep]
+```
+
+And now apply the predict function and look at the accuracy measures.
+
+```{r testequality,echo=TRUE}
+library(caret)
+test.predict <- predict(rfFit,testing.clean )
+postResample(test.predict, testing.clean$classe)
+```
+Very nice results on the testing data set. Lets look at the confusion matrix.
+
+```{r confusionmatrix}
+confusionMatrix(test.predict, testing.clean$classe)
+```
+
+We got ourselfs a very accurate model, on the training and test dataset.
+
+## The prediction to submit.
+
+Lets get and clean the prediction data set.
+
+```{r getcleanprediction, echo=TRUE}
+vars.test<-names(data.test)
+ignore.test<- c("problem_id",ignore )
+vars.keep.test <-setdiff(vars.test, ignore.test)
+data.test.clean <- data.test[,vars.keep.test]
+```
+
+And now we shall use the function provided in the submission webpage to export the files with the predictions.
+
+```{r exportpredictions}
+# Predictions
+pred <- predict(rfFit,data.test.clean)
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("./data/problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(pred)
+```
+
+### References
+
+* http://topepo.github.io/caret/index.html
+* http://appliedpredictivemodeling.com/
+* Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6. 
+* http://groupware.les.inf.puc-rio.br/har
+* http://onepager.togaware.com/
+
+
